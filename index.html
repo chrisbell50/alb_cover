@@ -20,6 +20,7 @@
     .toolbar input { width: 70px; }
     .toolbar label { margin-left: 8px; user-select: none; }
     .counts { opacity: .8; margin-left: 10px; }
+    .miles { opacity: .7; margin-left: 6px; font-style: italic; }
   </style>
 </head>
 <body>
@@ -51,6 +52,7 @@
         container.innerHTML = `
           <div class="panel toolbar">
             Radius (km): <input id="radiusKm" type="number" step="1" min="1" value="20">
+            <span class="miles" id="milesLabel">(≈ 12.4 mi)</span>
             <button id="applyRadius">Apply</button>
             <label title="When checked, recompute red/blue using a greedy algorithm for the current radius. If off, use the CSV's existing 'status' column.">
               <input id="recomputeToggle" type="checkbox" checked>
@@ -105,14 +107,13 @@
       return 2 * R * Math.asin(Math.sqrt(a));
     }
 
-    // Greedy set cover selection: choose centers to cover max uncovered each step
+    // Greedy set cover selection
     function greedyCover(radiusKm) {
       const n = allRows.length;
       const uncovered = new Set(Array.from({length:n}, (_,i)=>i));
       const redIdxs = [];
       const neighbors = Array.from({length:n}, () => []);
 
-      // precompute neighbors within radius
       for (let i=0; i<n; i++) {
         const si = allRows[i];
         const lat1 = readNumber(si.lat), lon1 = readNumber(si.long);
@@ -137,15 +138,20 @@
             bestCover = candidates;
           }
         }
-        if (bestI === -1) break; // safety
+        if (bestI === -1) break;
         redIdxs.push(bestI);
         bestCover.forEach(j => uncovered.delete(j));
       }
 
-      // build statuses
       const st = Array(n).fill('blue');
       redIdxs.forEach(i => st[i] = 'red');
       return st;
+    }
+
+    function updateMilesLabel(km) {
+      const mi = km * 0.621371;
+      const el = document.getElementById('milesLabel');
+      if (el) el.textContent = `(≈ ${mi.toFixed(1)} mi)`;
     }
 
     function draw() {
@@ -193,7 +199,7 @@
         boundsFitted = true;
       }
       const countsEl = document.getElementById('counts');
-      if (countsEl) countsEl.textContent = `Reds: ${reds} | Blues: ${blues} | Radius: ${currentRadiusKm} km`;
+      if (countsEl) countsEl.textContent = `Reds: ${reds} | Blues: ${blues} | Radius: ${currentRadiusKm} km (≈ ${(currentRadiusKm*0.621371).toFixed(1)} mi)`;
     }
 
     function wireToolbar() {
@@ -201,11 +207,20 @@
       const radiusInput = document.getElementById('radiusKm');
       const recompute = document.getElementById('recomputeToggle');
 
+      if (radiusInput) {
+        // Live miles preview as user types
+        radiusInput.addEventListener('input', () => {
+          const v = Number(radiusInput.value);
+          if (Number.isFinite(v) && v > 0) updateMilesLabel(v);
+        });
+      }
+
       if (applyBtn && radiusInput) {
         applyBtn.addEventListener('click', () => {
           const v = Number(radiusInput.value);
           if (Number.isFinite(v) && v > 0) {
             currentRadiusKm = v;
+            updateMilesLabel(currentRadiusKm);
             if (recompute && recompute.checked) {
               statuses = greedyCover(currentRadiusKm);
             }
@@ -219,7 +234,6 @@
           if (recompute.checked) {
             statuses = greedyCover(currentRadiusKm);
           } else {
-            // fall back to CSV statuses if present
             statuses = allRows.map(r => (r.status ? String(r.status) : 'blue'));
           }
           draw();
@@ -239,13 +253,14 @@
         const rowWithRadius = allRows.find(r => r.radius_km !== undefined && r.radius_km !== null && r.radius_km !== '');
         if (rowWithRadius && Number(rowWithRadius.radius_km)) currentRadiusKm = Number(rowWithRadius.radius_km);
 
-        // Initial mode: recompute greedy (ignores CSV status)
+        // Initial mode: recompute greedy
         statuses = greedyCover(currentRadiusKm);
 
-        // Sync UI values
+        // Sync UI and miles
         setTimeout(() => {
           const input = document.getElementById('radiusKm');
           if (input) input.value = currentRadiusKm;
+          updateMilesLabel(currentRadiusKm);
         }, 0);
 
         wireToolbar();
