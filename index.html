@@ -8,35 +8,28 @@
   <style>
     html, body { height: 100%; margin: 0; }
     #map { height: 100vh; width: 100vw; }
-    .legend, .toolbar {
+    .panel {
       background: #fff;
       padding: 8px 10px;
       border-radius: 10px;
       box-shadow: 0 2px 10px rgba(0,0,0,.1);
       font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      z-index: 10000; /* ensure above map panes/tiles */
     }
+    .leaflet-control { z-index: 10000 !important; } /* keep above panes */
     .legend .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; border-radius: 50%; vertical-align: -1px; }
-    /* Position legend as a Leaflet control bottom-left */
-    .legend-container { position: absolute; bottom: 16px; left: 16px; z-index: 10000; }
-    .toolbar input { width: 60px; }
-    .leaflet-control.custom-toolbar { background: transparent; box-shadow: none; }
+    .toolbar input { width: 70px; }
+    .toolbar label { margin-left: 8px; user-select: none; }
+    .counts { opacity: .8; margin-left: 10px; }
   </style>
 </head>
 <body>
   <div id="map"></div>
 
-  <div class="legend-container">
-    <div class="legend">
-      <div><span class="swatch" style="background:#e11d48;"></span> Red (coverage centers)</div>
-      <div><span class="swatch" style="background:#2563eb;"></span> Blue (covered stores)</div>
-    </div>
-  </div>
-
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
 
   <script>
+    // ---------- Map setup ----------
     const START = [39.5, -98.35];
     const START_ZOOM = 4;
     const map = L.map('map').setView(START, START_ZOOM);
@@ -51,21 +44,21 @@
     const redIcon  = (c='#e11d48') => L.circleMarker([0,0], { radius: 6, color:c, fillColor:c, fillOpacity:0.9, weight:1 });
     const blueIcon = (c='#2563eb') => L.circleMarker([0,0], { radius: 5, color:c, fillColor:c, fillOpacity:0.9, weight:1 });
 
-    let dataRows = [];
-    let currentRadiusKm = 20; // default fallback
-
-    // Create toolbar as a Leaflet control to ensure it stays on top
+    // ---------- Controls as Leaflet controls ----------
     const ToolbarControl = L.Control.extend({
       onAdd: function() {
-        const container = L.DomUtil.create('div', 'leaflet-control custom-toolbar');
+        const container = L.DomUtil.create('div', 'leaflet-control');
         container.innerHTML = `
-          <div class="toolbar">
+          <div class="panel toolbar">
             Radius (km): <input id="radiusKm" type="number" step="1" min="1" value="20">
             <button id="applyRadius">Apply</button>
-            <span id="counts" style="margin-left:10px;opacity:.8;"></span>
+            <label title="When checked, recompute red/blue using a greedy algorithm for the current radius. If off, use the CSV's existing 'status' column.">
+              <input id="recomputeToggle" type="checkbox" checked>
+              Recompute greedy
+            </label>
+            <span id="counts" class="counts"></span>
           </div>
         `;
-        // Prevent map dragging when interacting with inputs
         L.DomEvent.disableClickPropagation(container);
         L.DomEvent.disableScrollPropagation(container);
         return container;
@@ -73,6 +66,87 @@
       onRemove: function() {}
     });
     map.addControl(new ToolbarControl({ position: 'topleft' }));
+
+    const LegendControl = L.Control.extend({
+      onAdd: function() {
+        const container = L.DomUtil.create('div', 'leaflet-control');
+        container.innerHTML = `
+          <div class="panel legend">
+            <div><span class="swatch" style="background:#e11d48;"></span> Red (coverage centers)</div>
+            <div><span class="swatch" style="background:#2563eb;"></span> Blue (covered stores)</div>
+          </div>
+        `;
+        L.DomEvent.disableClickPropagation(container);
+        return container;
+      },
+      onRemove: function() {}
+    });
+    map.addControl(new LegendControl({ position: 'bottomleft' }));
+
+    // ---------- Data & helpers ----------
+    let allRows = [];          // original CSV rows
+    let statuses = [];         // current statuses array (parallel to allRows)
+    let currentRadiusKm = 20;  // live radius
+    let boundsFitted = false;  // fit bounds only once to avoid flicker
+
+    function readNumber(x) {
+      const v = Number(x);
+      return Number.isFinite(v) ? v : null;
+    }
+
+    // Haversine (km)
+    function haversineKm(lat1, lon1, lat2, lon2) {
+      const R = 6371.0088;
+      const toRad = (d) => d * Math.PI / 180;
+      const phi1 = toRad(lat1), phi2 = toRad(lat2);
+      const dphi = toRad(lat2 - lat1);
+      const dlambda = toRad(lon2 - lon1);
+      const a = Math.sin(dphi/2)**2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dlambda/2)**2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    // Greedy set cover selection: choose centers to cover max uncovered each step
+    function greedyCover(radiusKm) {
+      const n = allRows.length;
+      const uncovered = new Set(Array.from({length:n}, (_,i)=>i));
+      const redIdxs = [];
+      const neighbors = Array.from({length:n}, () => []);
+
+      // precompute neighbors within radius
+      for (let i=0; i<n; i++) {
+        const si = allRows[i];
+        const lat1 = readNumber(si.lat), lon1 = readNumber(si.long);
+        if (lat1 === null || lon1 === null) continue;
+        for (let j=0; j<n; j++) {
+          const sj = allRows[j];
+          const lat2 = readNumber(sj.lat), lon2 = readNumber(sj.long);
+          if (lat2 === null || lon2 === null) continue;
+          const d = haversineKm(lat1, lon1, lat2, lon2);
+          if (d <= radiusKm) neighbors[i].push(j);
+        }
+      }
+
+      while (uncovered.size > 0) {
+        let bestI = -1, bestGain = -1, bestCover = null;
+        for (let i=0; i<n; i++) {
+          const candidates = neighbors[i].filter(j => uncovered.has(j));
+          const gain = candidates.length;
+          if (gain > bestGain) {
+            bestGain = gain;
+            bestI = i;
+            bestCover = candidates;
+          }
+        }
+        if (bestI === -1) break; // safety
+        redIdxs.push(bestI);
+        bestCover.forEach(j => uncovered.delete(j));
+      }
+
+      // build statuses
+      const st = Array(n).fill('blue');
+      redIdxs.forEach(i => st[i] = 'red');
+      return st;
+    }
 
     function draw() {
       redLayer.clearLayers();
@@ -82,17 +156,19 @@
       const latlngs = [];
       let reds = 0, blues = 0;
 
-      dataRows.forEach(d => {
-        const lat = Number(d.lat);
-        const lon = Number(d.long);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      for (let i=0; i<allRows.length; i++) {
+        const d = allRows[i];
+        const lat = readNumber(d.lat);
+        const lon = readNumber(d.long);
+        if (lat === null || lon === null) continue;
         latlngs.push([lat, lon]);
 
         const title = d.store_name || d.store_id || '';
         const addr = [d.address, d.city, d.state, d.zip_code].filter(Boolean).join(', ');
         const phone = d.phone_number || '';
+        const status = statuses[i] || 'blue';
 
-        if ((d.status || '').toLowerCase() === 'red') {
+        if (status.toLowerCase() === 'red') {
           reds++;
           redIcon().setLatLng([lat, lon]).bindPopup(
             `<b>${title}</b><br>${addr}<br>${phone}<br><i>Red</i>`
@@ -110,42 +186,67 @@
             `<b>${title}</b><br>${addr}<br>${phone}<br><i>Blue</i>`
           ).addTo(blueLayer);
         }
-      });
+      }
 
-      if (latlngs.length) map.fitBounds(latlngs, { padding: [20,20] });
+      if (!boundsFitted && latlngs.length) {
+        map.fitBounds(latlngs, { padding: [20,20] });
+        boundsFitted = true;
+      }
       const countsEl = document.getElementById('counts');
       if (countsEl) countsEl.textContent = `Reds: ${reds} | Blues: ${blues} | Radius: ${currentRadiusKm} km`;
     }
 
-    // Wire up toolbar events after control is added
     function wireToolbar() {
       const applyBtn = document.getElementById('applyRadius');
       const radiusInput = document.getElementById('radiusKm');
+      const recompute = document.getElementById('recomputeToggle');
+
       if (applyBtn && radiusInput) {
         applyBtn.addEventListener('click', () => {
           const v = Number(radiusInput.value);
           if (Number.isFinite(v) && v > 0) {
             currentRadiusKm = v;
+            if (recompute && recompute.checked) {
+              statuses = greedyCover(currentRadiusKm);
+            }
             draw();
           }
         });
       }
+
+      if (recompute) {
+        recompute.addEventListener('change', () => {
+          if (recompute.checked) {
+            statuses = greedyCover(currentRadiusKm);
+          } else {
+            // fall back to CSV statuses if present
+            statuses = allRows.map(r => (r.status ? String(r.status) : 'blue'));
+          }
+          draw();
+        });
+      }
     }
 
+    // ---------- Load CSV ----------
     Papa.parse('red_blue.csv', {
       download: true,
       header: true,
       dynamicTyping: true,
       complete: (results) => {
-        dataRows = results.data;
+        allRows = results.data.filter(r => r && (r.lat !== undefined) && (r.long !== undefined));
 
-        // Auto-detect radius_km from CSV (first row with a value wins)
-        const rowWithRadius = dataRows.find(r => r.radius_km !== undefined && r.radius_km !== null && r.radius_km !== '');
-        if (rowWithRadius && Number(rowWithRadius.radius_km)) {
-          currentRadiusKm = Number(rowWithRadius.radius_km);
+        // Default radius from CSV if present
+        const rowWithRadius = allRows.find(r => r.radius_km !== undefined && r.radius_km !== null && r.radius_km !== '');
+        if (rowWithRadius && Number(rowWithRadius.radius_km)) currentRadiusKm = Number(rowWithRadius.radius_km);
+
+        // Initial mode: recompute greedy (ignores CSV status)
+        statuses = greedyCover(currentRadiusKm);
+
+        // Sync UI values
+        setTimeout(() => {
           const input = document.getElementById('radiusKm');
           if (input) input.value = currentRadiusKm;
-        }
+        }, 0);
 
         wireToolbar();
         draw();
