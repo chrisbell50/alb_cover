@@ -17,10 +17,11 @@
     }
     .leaflet-control { z-index: 10000 !important; } /* keep above panes */
     .legend .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; border-radius: 50%; vertical-align: -1px; }
-    .toolbar input { width: 70px; }
+    .toolbar input { width: 72px; }
     .toolbar label { margin-left: 8px; user-select: none; }
     .counts { opacity: .8; margin-left: 10px; }
-    .miles { opacity: .7; margin-left: 6px; font-style: italic; }
+    .unit { opacity: .7; margin-left: 6px; font-style: italic; white-space: nowrap; }
+    .sep { margin: 0 6px; opacity: .5; }
   </style>
 </head>
 <body>
@@ -52,8 +53,12 @@
         container.innerHTML = `
           <div class="panel toolbar">
             Radius (km): <input id="radiusKm" type="number" step="1" min="1" value="20">
-            <span class="miles" id="milesLabel">(≈ 12.4 mi)</span>
-            <button id="applyRadius">Apply</button>
+            <span class="unit" id="milesLabel">(≈ 12.4 mi)</span>
+            <span class="sep">|</span>
+            Avg speed (km/h): <input id="speedKmh" type="number" step="1" min="1" value="35">
+            <span class="unit" id="mphLabel">(≈ 21.7 mph)</span>
+            <span class="unit" id="etaLabel">≈ 34.3 min</span>
+            <button id="applyRadius" style="margin-left:8px;">Apply</button>
             <label title="When checked, recompute red/blue using a greedy algorithm for the current radius. If off, use the CSV's existing 'status' column.">
               <input id="recomputeToggle" type="checkbox" checked>
               Recompute greedy
@@ -89,6 +94,7 @@
     let allRows = [];          // original CSV rows
     let statuses = [];         // current statuses array (parallel to allRows)
     let currentRadiusKm = 20;  // live radius
+    let speedKmh = 35;         // live average speed estimate
     let boundsFitted = false;  // fit bounds only once to avoid flicker
 
     function readNumber(x) {
@@ -148,10 +154,24 @@
       return st;
     }
 
-    function updateMilesLabel(km) {
-      const mi = km * 0.621371;
-      const el = document.getElementById('milesLabel');
-      if (el) el.textContent = `(≈ ${mi.toFixed(1)} mi)`;
+    function kmToMiles(km) { return km * 0.621371; }
+    function kmhToMph(kmh) { return kmh * 0.621371; }
+
+    function updateDerivedLabels() {
+      // miles
+      const mi = kmToMiles(currentRadiusKm);
+      const milesEl = document.getElementById('milesLabel');
+      if (milesEl) milesEl.textContent = `(≈ ${mi.toFixed(1)} mi)`;
+
+      // mph
+      const mph = kmhToMph(speedKmh);
+      const mphEl = document.getElementById('mphLabel');
+      if (mphEl) mphEl.textContent = `(≈ ${mph.toFixed(1)} mph)`;
+
+      // eta minutes (simple straight-line estimate)
+      const etaMin = speedKmh > 0 ? (currentRadiusKm / speedKmh) * 60 : NaN;
+      const etaEl = document.getElementById('etaLabel');
+      if (etaEl) etaEl.textContent = Number.isFinite(etaMin) ? `≈ ${etaMin.toFixed(1)} min` : '—';
     }
 
     function draw() {
@@ -199,33 +219,46 @@
         boundsFitted = true;
       }
       const countsEl = document.getElementById('counts');
-      if (countsEl) countsEl.textContent = `Reds: ${reds} | Blues: ${blues} | Radius: ${currentRadiusKm} km (≈ ${(currentRadiusKm*0.621371).toFixed(1)} mi)`;
+      if (countsEl) countsEl.textContent = `Reds: ${reds} | Blues: ${blues} | Radius: ${currentRadiusKm} km (≈ ${kmToMiles(currentRadiusKm).toFixed(1)} mi), ETA ≈ ${ (speedKmh>0 ? ((currentRadiusKm/speedKmh)*60).toFixed(1) : '—') } min`;
     }
 
     function wireToolbar() {
       const applyBtn = document.getElementById('applyRadius');
       const radiusInput = document.getElementById('radiusKm');
+      const speedInput = document.getElementById('speedKmh');
       const recompute = document.getElementById('recomputeToggle');
 
+      // Live label updates
       if (radiusInput) {
-        // Live miles preview as user types
         radiusInput.addEventListener('input', () => {
           const v = Number(radiusInput.value);
-          if (Number.isFinite(v) && v > 0) updateMilesLabel(v);
+          if (Number.isFinite(v) && v > 0) {
+            currentRadiusKm = v;
+            updateDerivedLabels();
+          }
+        });
+      }
+      if (speedInput) {
+        speedInput.addEventListener('input', () => {
+          const v = Number(speedInput.value);
+          if (Number.isFinite(v) && v > 0) {
+            speedKmh = v;
+            updateDerivedLabels();
+          }
         });
       }
 
       if (applyBtn && radiusInput) {
         applyBtn.addEventListener('click', () => {
-          const v = Number(radiusInput.value);
-          if (Number.isFinite(v) && v > 0) {
-            currentRadiusKm = v;
-            updateMilesLabel(currentRadiusKm);
-            if (recompute && recompute.checked) {
-              statuses = greedyCover(currentRadiusKm);
-            }
-            draw();
+          const r = Number(radiusInput.value);
+          const s = Number(speedInput.value);
+          if (Number.isFinite(r) && r > 0) currentRadiusKm = r;
+          if (Number.isFinite(s) && s > 0) speedKmh = s;
+          updateDerivedLabels();
+          if (recompute && recompute.checked) {
+            statuses = greedyCover(currentRadiusKm);
           }
+          draw();
         });
       }
 
@@ -256,11 +289,13 @@
         // Initial mode: recompute greedy
         statuses = greedyCover(currentRadiusKm);
 
-        // Sync UI and miles
+        // Sync UI & derived labels
         setTimeout(() => {
-          const input = document.getElementById('radiusKm');
-          if (input) input.value = currentRadiusKm;
-          updateMilesLabel(currentRadiusKm);
+          const rIn = document.getElementById('radiusKm');
+          const sIn = document.getElementById('speedKmh');
+          if (rIn) rIn.value = currentRadiusKm;
+          if (sIn) sIn.value = speedKmh;
+          updateDerivedLabels();
         }, 0);
 
         wireToolbar();
