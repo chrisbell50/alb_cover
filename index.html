@@ -8,32 +8,29 @@
   <style>
     html, body { height: 100%; margin: 0; }
     #map { height: 100vh; width: 100vw; }
-    .legend {
-      position: absolute; bottom: 16px; left: 16px; background: #fff;
-      padding: 8px 10px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.1);
+    .legend, .toolbar {
+      background: #fff;
+      padding: 8px 10px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.1);
       font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      z-index: 10000; /* ensure above map panes/tiles */
     }
     .legend .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; border-radius: 50%; vertical-align: -1px; }
-    .toolbar {
-      position: absolute; top: 16px; left: 16px; background: #fff;
-      padding: 8px 10px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.1);
-      font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-    }
+    /* Position legend as a Leaflet control bottom-left */
+    .legend-container { position: absolute; bottom: 16px; left: 16px; z-index: 10000; }
     .toolbar input { width: 60px; }
+    .leaflet-control.custom-toolbar { background: transparent; box-shadow: none; }
   </style>
 </head>
 <body>
   <div id="map"></div>
 
-  <div class="toolbar">
-    Radius (km): <input id="radiusKm" type="number" step="1" min="1" value="20">
-    <button id="applyRadius">Apply</button>
-    <span id="counts" style="margin-left:10px;opacity:.8;"></span>
-  </div>
-
-  <div class="legend">
-    <div><span class="swatch" style="background:#e11d48;"></span> Red (coverage centers)</div>
-    <div><span class="swatch" style="background:#2563eb;"></span> Blue (covered stores)</div>
+  <div class="legend-container">
+    <div class="legend">
+      <div><span class="swatch" style="background:#e11d48;"></span> Red (coverage centers)</div>
+      <div><span class="swatch" style="background:#2563eb;"></span> Blue (covered stores)</div>
+    </div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -56,6 +53,26 @@
 
     let dataRows = [];
     let currentRadiusKm = 20; // default fallback
+
+    // Create toolbar as a Leaflet control to ensure it stays on top
+    const ToolbarControl = L.Control.extend({
+      onAdd: function() {
+        const container = L.DomUtil.create('div', 'leaflet-control custom-toolbar');
+        container.innerHTML = `
+          <div class="toolbar">
+            Radius (km): <input id="radiusKm" type="number" step="1" min="1" value="20">
+            <button id="applyRadius">Apply</button>
+            <span id="counts" style="margin-left:10px;opacity:.8;"></span>
+          </div>
+        `;
+        // Prevent map dragging when interacting with inputs
+        L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.disableScrollPropagation(container);
+        return container;
+      },
+      onRemove: function() {}
+    });
+    map.addControl(new ToolbarControl({ position: 'topleft' }));
 
     function draw() {
       redLayer.clearLayers();
@@ -96,16 +113,24 @@
       });
 
       if (latlngs.length) map.fitBounds(latlngs, { padding: [20,20] });
-      document.getElementById('counts').textContent = `Reds: ${reds} | Blues: ${blues} | Radius: ${currentRadiusKm} km`;
+      const countsEl = document.getElementById('counts');
+      if (countsEl) countsEl.textContent = `Reds: ${reds} | Blues: ${blues} | Radius: ${currentRadiusKm} km`;
     }
 
-    document.getElementById('applyRadius').addEventListener('click', () => {
-      const v = Number(document.getElementById('radiusKm').value);
-      if (Number.isFinite(v) && v > 0) {
-        currentRadiusKm = v;
-        draw();
+    // Wire up toolbar events after control is added
+    function wireToolbar() {
+      const applyBtn = document.getElementById('applyRadius');
+      const radiusInput = document.getElementById('radiusKm');
+      if (applyBtn && radiusInput) {
+        applyBtn.addEventListener('click', () => {
+          const v = Number(radiusInput.value);
+          if (Number.isFinite(v) && v > 0) {
+            currentRadiusKm = v;
+            draw();
+          }
+        });
       }
-    });
+    }
 
     Papa.parse('red_blue.csv', {
       download: true,
@@ -122,6 +147,7 @@
           if (input) input.value = currentRadiusKm;
         }
 
+        wireToolbar();
         draw();
       },
       error: (err) => console.error(err)
