@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Store Coverage – Red/Blue</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100vh; width: 100vw; }
+    .legend {
+      position: absolute; bottom: 16px; left: 16px; background: #fff;
+      padding: 8px 10px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.1);
+      font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .legend .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; border-radius: 50%; vertical-align: -1px; }
+    .toolbar {
+      position: absolute; top: 16px; left: 16px; background: #fff;
+      padding: 8px 10px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,.1);
+      font: 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .toolbar input { width: 60px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="toolbar">
+    Radius (km): <input id="radiusKm" type="number" step="1" min="1" value="20">
+    <button id="applyRadius">Apply</button>
+    <span id="counts" style="margin-left:10px;opacity:.8;"></span>
+  </div>
+
+  <div class="legend">
+    <div><span class="swatch" style="background:#e11d48;"></span> Red (coverage centers)</div>
+    <div><span class="swatch" style="background:#2563eb;"></span> Blue (covered stores)</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <script>
+    const START = [39.5, -98.35];
+    const START_ZOOM = 4;
+    const map = L.map('map').setView(START, START_ZOOM);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const redLayer  = L.layerGroup().addTo(map);
+    const blueLayer = L.layerGroup().addTo(map);
+    const circleLayer = L.layerGroup().addTo(map);
+
+    const redIcon  = (c='#e11d48') => L.circleMarker([0,0], { radius: 6, color:c, fillColor:c, fillOpacity:0.9, weight:1 });
+    const blueIcon = (c='#2563eb') => L.circleMarker([0,0], { radius: 5, color:c, fillColor:c, fillOpacity:0.9, weight:1 });
+
+    let dataRows = [];
+    let currentRadiusKm = 20;
+
+    function draw() {
+      redLayer.clearLayers();
+      blueLayer.clearLayers();
+      circleLayer.clearLayers();
+
+      const latlngs = [];
+      let reds = 0, blues = 0;
+
+      dataRows.forEach(d => {
+        const lat = Number(d.lat);
+        const lon = Number(d.long);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+        latlngs.push([lat, lon]);
+
+        const title = d.store_name || d.store_id || '';
+        const addr = [d.address, d.city, d.state, d.zip_code].filter(Boolean).join(', ');
+        const phone = d.phone_number || '';
+
+        if ((d.status || '').toLowerCase() === 'red') {
+          reds++;
+          redIcon().setLatLng([lat, lon]).bindPopup(
+            `<b>${title}</b><br>${addr}<br>${phone}<br><i>Red</i>`
+          ).addTo(redLayer);
+          L.circle([lat, lon], {
+            radius: currentRadiusKm * 1000,
+            color: '#f43f5e',
+            fillColor: '#fda4af',
+            fillOpacity: 0.12,
+            weight: 1
+          }).addTo(circleLayer);
+        } else {
+          blues++;
+          blueIcon().setLatLng([lat, lon]).bindPopup(
+            `<b>${title}</b><br>${addr}<br>${phone}<br><i>Blue</i>`
+          ).addTo(blueLayer);
+        }
+      });
+
+      if (latlngs.length) map.fitBounds(latlngs, { padding: [20,20] });
+      document.getElementById('counts').textContent = `Reds: ${reds} | Blues: ${blues}`;
+    }
+
+    document.getElementById('applyRadius').addEventListener('click', () => {
+      const v = Number(document.getElementById('radiusKm').value);
+      if (Number.isFinite(v) && v > 0) {
+        currentRadiusKm = v;
+        draw();
+      }
+    });
+
+    Papa.parse('red_blue.csv', {
+      download: true,
+      header: true,
+      dynamicTyping: true,
+      complete: (results) => {
+        dataRows = results.data;
+        // default radius matches file used to compute
+        const sample = dataRows.find(r => Number.isFinite(Number(r.lat)));
+        // keep input default as 20 unless user changes
+        draw();
+      },
+      error: (err) => console.error(err)
+    });
+  </script>
+</body>
+</html>
